@@ -33,6 +33,7 @@ usage() {
     echo "    --sshcmd  ssh_cmd  Set ssh command" > /dev/stderr
     echo "    --ssharg  ssh_arg  Add ssh argument" > /dev/stderr
     echo "    -h        Help" > /dev/stderr
+    echo "    -v        Verbose; print layer and size information" > /dev/stderr
 }
 
 tmpdir=
@@ -45,7 +46,7 @@ trap cleanup EXIT
 
 ssh=ssh
 ssh_args=()
-
+verbose=0
 while [[ "$1" =~ ^- ]]; do
     case "$1" in
         --sshcmd)
@@ -59,6 +60,9 @@ while [[ "$1" =~ ^- ]]; do
         -h)
             usage
             exit 1
+            ;;
+        -v)
+            verbose=1
             ;;
         *)
             echo "ERROR: unknown option '$1'" > /dev/stderr
@@ -101,6 +105,10 @@ tmpdir=$(mktemp -d)
 cd "${tmpdir}"
 docker save -o image.tar "${docker_image}"
 tar xf image.tar manifest.json
+if [ ${verbose} -eq 1 ]; then
+    du_out=($(du -b --apparent-size image.tar | awk '{print $1}'))
+    size_orig="${du_out[0]}"
+fi
 config_json=$(cat manifest.json | jq -c -r '.[0].Config')
 image_layers=($(cat manifest.json | jq -c -r '.[0].Layers[]'))
 if [ -z "${config_json}" ]; then
@@ -117,12 +125,27 @@ if [ $layer_count -ne $sha_count ]; then
 fi
 to_delete=()
 for i in $(seq 0 $(($layer_count - 1))); do
-    if [[ "${remote_shas}" =~ ${image_shas[$i]} ]]; then
-        to_delete+=("${image_layers[$i]}")
+    sha="${image_shas[$i]}"
+    layer="${image_layers[$i]}"
+    if [[ "${remote_shas}" =~ ${sha} ]]; then
+        to_delete+=("${layer}")
+        if [ ${verbose} -eq 1 ]; then
+            echo "Layer Skip:     ${sha} ${layer}"
+        fi
+    else
+        if [ ${verbose} -eq 1 ]; then
+            echo "Layer Transfer: ${sha} ${layer}"
+        fi
     fi
 done
 
 if [ ${#to_delete[@]} -ne 0 ]; then
     tar --delete --file image.tar "${to_delete[@]}"
+fi
+if [ ${verbose} -eq 1 ]; then
+    du_out=($(du -b --apparent-size image.tar | awk '{print $1}'))
+    size_transfer="${du_out[0]}"
+    percent=$(($size_transfer * 100 / $size_orig))
+    echo "Image: orig ${size_orig} transfer ${size_transfer} percent ~${percent_transfer}%"
 fi
 "${ssh}" "${ssh_args[@]}" "${destination_host}" docker load < image.tar
