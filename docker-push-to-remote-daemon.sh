@@ -90,54 +90,63 @@ if [ $# -gt 1 ]; then
     exit 1
 fi
 
-list_shas=$(base64 -w0 <<'ENDOFHERE'
-image_ids=($(docker image ls -a --format "{{json . }}" | jq -c -r '.ID'))
-shas=()
-for image_id in "${image_ids[@]}"; do
-    docker inspect --format '{{ json . }}' "${image_id}" | jq -c -r '.RootFS.Layers[]'
-done
-ENDOFHERE
-)
-# Deliberately not an array, since bash has no "in array/set" operator...
-remote_shas=$("${ssh}" "${ssh_args[@]}" "${destination_host}" bash -e -o pipefail "<(echo ${list_shas} | base64 -d)")
-
 tmpdir=$(mktemp -d)
 cd "${tmpdir}"
 docker save -o image.tar "${docker_image}"
-tar xf image.tar manifest.json
 if [ ${verbose} -eq 1 ]; then
     du_out=($(du -b --apparent-size image.tar | awk '{print $1}'))
     size_orig="${du_out[0]}"
 fi
-config_json=$(cat manifest.json | jq -c -r '.[0].Config')
-image_layers=($(cat manifest.json | jq -c -r '.[0].Layers[]'))
-if [ -z "${config_json}" ]; then
-    echo "ERROR: cannot determine config JSON filename" > /dev/stderr
-    exit 1
-fi
-tar xf image.tar "${config_json}"
-image_shas=($(cat "${config_json}" | jq -c -r '.rootfs.diff_ids[]'))
-layer_count=${#image_layers[@]}
-sha_count=${#image_shas[@]}
-if [ $layer_count -ne $sha_count ]; then
-    echo "ERROR: inconsistent layer count in manifest and config" > /dev/stderr
-    exit 1
-fi
 to_delete=()
-for i in $(seq 0 $(($layer_count - 1))); do
-    sha="${image_shas[$i]}"
-    layer="${image_layers[$i]}"
-    if [[ "${remote_shas}" =~ ${sha} ]]; then
-        to_delete+=("${layer}")
-        if [ ${verbose} -eq 1 ]; then
-            echo "Layer Skip:     ${sha} ${layer}"
-        fi
-    else
-        if [ ${verbose} -eq 1 ]; then
-            echo "Layer Transfer: ${sha} ${layer}"
-        fi
+
+set +e
+hash jq 2>/dev/null
+hash_ret=$?
+set -e
+if [ ${hash_ret} -ne 0 ]; then
+    echo "WARNING: jq not installed; will not optimize copied layer set" > /dev/stderr
+else
+    list_shas=$(base64 -w0 <<'ENDOFHERE'
+    image_ids=($(docker image ls -a --format "{{json . }}" | jq -c -r '.ID'))
+    shas=()
+    for image_id in "${image_ids[@]}"; do
+        docker inspect --format '{{ json . }}' "${image_id}" | jq -c -r '.RootFS.Layers[]'
+    done
+ENDOFHERE
+    )
+    # Deliberately not an array, since bash has no "in array/set" operator...
+    remote_shas=$("${ssh}" "${ssh_args[@]}" "${destination_host}" bash -e -o pipefail "<(echo ${list_shas} | base64 -d)")
+
+    tar xf image.tar manifest.json
+    config_json=$(cat manifest.json | jq -c -r '.[0].Config')
+    image_layers=($(cat manifest.json | jq -c -r '.[0].Layers[]'))
+    if [ -z "${config_json}" ]; then
+        echo "ERROR: cannot determine config JSON filename" > /dev/stderr
+        exit 1
     fi
-done
+    tar xf image.tar "${config_json}"
+    image_shas=($(cat "${config_json}" | jq -c -r '.rootfs.diff_ids[]'))
+    layer_count=${#image_layers[@]}
+    sha_count=${#image_shas[@]}
+    if [ $layer_count -ne $sha_count ]; then
+        echo "ERROR: inconsistent layer count in manifest and config" > /dev/stderr
+        exit 1
+    fi
+    for i in $(seq 0 $(($layer_count - 1))); do
+        sha="${image_shas[$i]}"
+        layer="${image_layers[$i]}"
+        if [[ "${remote_shas}" =~ ${sha} ]]; then
+            to_delete+=("${layer}")
+            if [ ${verbose} -eq 1 ]; then
+                echo "Layer Skip:     ${sha} ${layer}"
+            fi
+        else
+            if [ ${verbose} -eq 1 ]; then
+                echo "Layer Transfer: ${sha} ${layer}"
+            fi
+        fi
+    done
+fi
 
 if [ ${#to_delete[@]} -ne 0 ]; then
     tar --delete --file image.tar "${to_delete[@]}"
