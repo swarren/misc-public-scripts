@@ -146,6 +146,6 @@ if [ ${verbose} -eq 1 ]; then
     du_out=($(du -b --apparent-size image.tar | awk '{print $1}'))
     size_transfer="${du_out[0]}"
     percent=$(($size_transfer * 100 / $size_orig))
-    echo "Image: orig ${size_orig} transfer ${size_transfer} percent ~${percent_transfer}%"
+    echo "Image: orig ${size_orig} transfer ${size_transfer} percent ~${percent}%"
 fi
 "${ssh}" "${ssh_args[@]}" "${destination_host}" docker load < image.tar
